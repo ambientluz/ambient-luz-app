@@ -1,83 +1,114 @@
 export const config = { runtime: 'edge' };
 
+async function renovarToken(refreshToken, clientId, clientSecret) {
+  const credentials = btoa(`${clientId}:${clientSecret}`);
+  const resp = await fetch('https://www.bling.com.br/Api/v3/oauth/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Authorization': `Basic ${credentials}`,
+    },
+    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
+  });
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  return data.access_token || null;
+}
+
 export default async function handler(req) {
   const url = new URL(req.url);
   const codigo = url.searchParams.get('codigo');
-  
+  const debug = url.searchParams.get('debug') === '1';
+
   if (!codigo) {
-    return new Response(JSON.stringify({ error: 'Código não informado' }), { status: 400 });
+    return new Response(JSON.stringify({ error: 'Código não informado' }), {
+      status: 400, headers: { 'Content-Type': 'application/json' }
+    });
   }
 
-  // Pega o token do cookie
   const cookieHeader = req.headers.get('cookie') || '';
-  const cookies = Object.fromEntries(cookieHeader.split(';').map(c => {
-    const [k, ...v] = c.trim().split('=');
-    return [k, v.join('=')];
-  }));
-  
+  const cookies = Object.fromEntries(
+    cookieHeader.split(';').map(c => {
+      const [k, ...v] = c.trim().split('=');
+      return [k.trim(), v.join('=')];
+    })
+  );
+
   let accessToken = cookies.bling_access;
 
-  // Se não tem token, tenta renovar com refresh token
+  // Renova token se necessário
   if (!accessToken && cookies.bling_refresh) {
-    const clientId = process.env.BLING_CLIENT_ID;
-    const clientSecret = process.env.BLING_CLIENT_SECRET;
-    const credentials = btoa(`${clientId}:${clientSecret}`);
-
-    const refreshResp = await fetch('https://www.bling.com.br/Api/v3/oauth/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': `Basic ${credentials}`,
-      },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: cookies.bling_refresh,
-      }),
-    });
-
-    const refreshData = await refreshResp.json();
-    if (refreshResp.ok) {
-      accessToken = refreshData.access_token;
-    }
+    accessToken = await renovarToken(
+      cookies.bling_refresh,
+      process.env.BLING_CLIENT_ID,
+      process.env.BLING_CLIENT_SECRET
+    );
   }
 
   if (!accessToken) {
     return new Response(JSON.stringify({ error: 'Não autenticado', redirect: '/api/autorizar' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' },
+      status: 401, headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  // Busca produto no Bling pelo código
+  // Busca produto por código
   const blingResp = await fetch(
     `https://www.bling.com.br/Api/v3/produtos?codigo=${encodeURIComponent(codigo)}&limite=1`,
     {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Accept': 'application/json',
-      },
+      }
     }
   );
 
   const blingData = await blingResp.json();
 
-  if (!blingResp.ok || !blingData.data?.length) {
-    return new Response(JSON.stringify({ error: 'Produto não encontrado' }), {
-      status: 404,
-      headers: { 'Content-Type': 'application/json' },
+  // Modo debug — retorna JSON bruto para diagnóstico
+  if (debug) {
+    return new Response(JSON.stringify(blingData), {
+      status: 200, headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  const produto = blingData.data[0];
-  
+  if (!blingResp.ok || !blingData.data?.length) {
+    return new Response(JSON.stringify({ error: 'Produto não encontrado', codigo }), {
+      status: 404, headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  const p = blingData.data[0];
+
+  // Extrai foto — tenta múltiplos campos possíveis
+  const foto =
+    p.imagemURL ||
+    p.imagem ||
+    p.urlImagem ||
+    p.midia?.imagens?.[0]?.link ||
+    p.midia?.imagens?.[0]?.url ||
+    p.imagens?.[0]?.link ||
+    p.imagens?.[0]?.url ||
+    null;
+
+  // Extrai custo — tenta múltiplos campos possíveis
+  const precoCusto =
+    p.precoCusto ??
+    p.preco_custo ??
+    p.custoMedio ??
+    p.custo ??
+    null;
+
   return new Response(JSON.stringify({
-    codigo: produto.codigo,
-    nome: produto.nome,
-    preco: produto.preco,
-    precoCusto: produto.precoCusto,
-    foto: produto.imagemURL || produto.midia?.imagens?.[0]?.link || null,
+    id: p.id,
+    codigo: p.codigo,
+    nome: p.nome,
+    preco: p.preco,
+    precoCusto,
+    foto,
+    // Campos brutos para diagnóstico
+    _campos: Object.keys(p),
   }), {
     status: 200,
-    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
   });
 }
