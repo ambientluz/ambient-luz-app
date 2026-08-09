@@ -1,4 +1,4 @@
-export const config = { runtime: 'edge' };
+export const config = { runtime: 'nodejs', maxDuration: 60 };
 
 const SYSTEM_PROMPT = `Você é um parser de propostas comerciais da Ambient Luz. Retorne APENAS JSON válido, sem markdown, sem texto antes ou depois.
 
