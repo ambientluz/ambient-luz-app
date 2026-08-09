@@ -62,9 +62,35 @@ Regras:
 const fmtBRL = (v) => Number(v).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 const fmtPct = (v) => `${Number(v).toFixed(1)}%`;
 const margemCor = (m) => m >= 60 ? "#16a34a" : m >= 45 ? "#d97706" : "#dc2626";
-const STORAGE_KEY = "aluz_propostas_v2";
-function loadPropostas() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]"); } catch { return []; } }
-function savePropostas(list) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch {} }
+// Storage via servidor (Upstash)
+async function loadPropostasServer() {
+  try {
+    const resp = await fetch("/api/propostas");
+    if (!resp.ok) return [];
+    return await resp.json();
+  } catch { return []; }
+}
+
+async function salvarPropostaServer(proposta) {
+  try {
+    const resp = await fetch("/api/propostas", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "salvar", proposta })
+    });
+    return await resp.json();
+  } catch { return null; }
+}
+
+async function atualizarPropostaServer(id, updates) {
+  try {
+    await fetch("/api/propostas", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "atualizar", id, updates })
+    });
+  } catch {}
+}
 const SENHAS = { "123456": "gestor", "12345": "projetista" };
 function getRole() { try { return sessionStorage.getItem("aluz_role") || null; } catch { return null; } }
 function setRole(r) { try { sessionStorage.setItem("aluz_role", r); } catch {} }
@@ -284,10 +310,13 @@ function AbaProjetista({ historico, setHistorico }) {
     setProposta(p);
   };
 
-  const enviarAoGestor = () => {
-    const entry = { id:Date.now(), ...proposta, custo:null, desconto:0, status:"aguardando_custo", criadoEm: new Date().toISOString() };
-    const novo = [...historico, entry];
-    setHistorico(novo); savePropostas(novo); setEtapa("enviado");
+  const enviarAoGestor = async () => {
+    const entry = { ...proposta, custo:null, desconto:0, status:"aguardando_custo" };
+    const salvo = await salvarPropostaServer(entry);
+    if (salvo) {
+      setHistorico(prev => [...prev, salvo]);
+    }
+    setEtapa("enviado");
   };
 
   if (etapa==="processando") return (
@@ -483,11 +512,11 @@ function AbaGestor({ historico, setHistorico }) {
 
   const calc = proposta ? calcularMargem(proposta, desconto, formaPgto, temRT, temCasaPremium) : null;
 
-  const salvarConfig = () => {
+  const salvarConfig = async () => {
     if (!proposta) return;
-    const idx = historico.length - 1 - historico.slice().reverse().findIndex((_, i) => selecionada === historico.length-1-i);
-    const novo = historico.map((p,i) => i===selecionada ? {...p, desconto, formaPgto, temRT, temCasaPremium, status:"com_custo"} : p);
-    setHistorico(novo); savePropostas(novo);
+    const updates = { desconto, formaPgto, temRT, temCasaPremium, status: "com_custo" };
+    await atualizarPropostaServer(proposta.id, updates);
+    setHistorico(prev => prev.map((p,i) => i===selecionada ? {...p, ...updates} : p));
   };
 
   useEffect(() => {
@@ -681,10 +710,30 @@ function AbaGestor({ historico, setHistorico }) {
 export default function App() {
   const [role, setRoleState] = useState(getRole);
   const [aba, setAba] = useState("Projetista");
-  const [historico, setHistorico] = useState(loadPropostas);
+  const [historico, setHistorico] = useState([]);
+  const [carregando, setCarregando] = useState(true);
+
+  useEffect(() => {
+    if (role) {
+      loadPropostasServer().then(p => {
+        setHistorico(p || []);
+        setCarregando(false);
+      });
+    } else {
+      setCarregando(false);
+    }
+  }, [role]);
   const handleLogin = (r) => setRoleState(r);
   const handleLogout = () => { clearRole(); setRoleState(null); };
   if (!role) return <LoginScreen onLogin={handleLogin} />;
+  if (carregando) return (
+    <div style={{ minHeight:"100vh", background:"#f4f4f5", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"system-ui,-apple-system,sans-serif" }}>
+      <div style={{ textAlign:"center" }}>
+        <div style={{ fontSize:32, marginBottom:12 }}>⏳</div>
+        <p style={{ fontSize:14, color:"#6b7280" }}>Carregando propostas...</p>
+      </div>
+    </div>
+  );
   return (
     <div style={{ minHeight:"100vh", background:"#f4f4f5", fontFamily:"system-ui,-apple-system,sans-serif" }}>
       <TopBar aba={aba} setAba={setAba} role={role} onLogout={handleLogout} />
